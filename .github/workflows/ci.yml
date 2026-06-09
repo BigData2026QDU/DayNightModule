@@ -1,0 +1,515 @@
+name: CI — 全面检查
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-structure:
+    name: 结构合规检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查必要文件
+        run: |
+          echo "=== 检查仓库根目录必要文件 ==="
+          for f in Architecture.md README.md File_Index.md .gitignore; do
+            [ -f "$f" ] || { echo "❌ 缺少 $f"; exit 1; }
+            echo "✅ $f"
+          done
+
+          echo ""
+          echo "=== 检查源码目录 ==="
+          for f in DayNightModule/modules/theme/theme.css DayNightModule/modules/theme/theme-manager.js; do
+            [ -f "$f" ] || { echo "❌ 缺少 $f"; exit 1; }
+            echo "✅ $f"
+          done
+
+          echo ""
+          echo "=== 检查不应存在的文件 ==="
+          # 不应有 Java 文件
+          if find . -name "*.java" ! -path "./.git/*" ! -path "./AGENTS/*" | grep -q .; then
+            echo "❌ 发现不应存在的 .java 文件"
+            exit 1
+          fi
+          echo "✅ 无多余 .java 文件"
+
+          # 不应有 pom.xml / build.gradle
+          for f in pom.xml build.gradle; do
+            if [ -f "$f" ] || find . -name "$f" ! -path "./.git/*" ! -path "./AGENTS/*" | grep -q .; then
+              echo "❌ 发现不应存在的 $f"
+              exit 1
+            fi
+          done
+          echo "✅ 无构建配置文件"
+
+          echo ""
+          echo "✅ 结构合规检查通过"
+
+  check-filesize:
+    name: 文件体积检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查文件大小
+        run: |
+          echo "=== 模块文件体积检查 ==="
+          MAX_CSS=5120    # 5KB
+          MAX_JS=10240    # 10KB
+          MAX_TOTAL=15360 # 15KB
+
+          css_size=$(wc -c < DayNightModule/modules/theme/theme.css)
+          js_size=$(wc -c < DayNightModule/modules/theme/theme-manager.js)
+          total=$((css_size + js_size))
+
+          echo "theme.css:      ${css_size} bytes (上限 ${MAX_CSS})"
+          echo "theme-manager.js: ${js_size} bytes (上限 ${MAX_JS})"
+          echo "总计:             ${total} bytes (上限 ${MAX_TOTAL})"
+
+          [ "$css_size" -le "$MAX_CSS" ] || { echo "❌ theme.css 超过 ${MAX_CSS} bytes"; exit 1; }
+          [ "$js_size" -le "$MAX_JS" ] || { echo "❌ theme-manager.js 超过 ${MAX_JS} bytes"; exit 1; }
+          [ "$total" -le "$MAX_TOTAL" ] || { echo "❌ 模块总计超过 ${MAX_TOTAL} bytes"; exit 1; }
+
+          echo ""
+          echo "✅ 文件体积检查通过"
+
+  check-js:
+    name: JavaScript 质量检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: JS 语法检查
+        run: |
+          echo "=== node --check 语法验证 ==="
+          node --check DayNightModule/modules/theme/theme-manager.js
+          echo "✅ JS 语法正确"
+
+      - name: JS 静态质量检查
+        run: |
+          JS="DayNightModule/modules/theme/theme-manager.js"
+          FAIL=0
+
+          # --- 调试语句残留 ---
+          echo ""
+          echo "=== 检查调试语句残留 ==="
+          for pattern in "console\.log" "console\.debug" "debugger" "alert\("; do
+            if grep -nE "$pattern" "$JS"; then
+              echo "❌ 发现调试语句: $pattern"
+              FAIL=1
+            fi
+          done
+          echo "✅ 无调试语句残留"
+
+          # --- 危险 API ---
+          echo ""
+          echo "=== 检查危险 API ==="
+          for pattern in "eval\(" "new Function\(" "document\.write" "window\.location\s*=" "innerHTML\s*="; do
+            if grep -nE "$pattern" "$JS"; then
+              echo "❌ 发现危险 API: $pattern"
+              FAIL=1
+            fi
+          done
+          echo "✅ 无危险 API"
+
+          # --- 公开 API 完整性 ---
+          echo ""
+          echo "=== 检查公开 API 完整性 ==="
+          for method in "getCurrentTheme" "setTheme" "toggleTheme" "clearSavedTheme" "getConfig" "destroy" "startAutoUpdate" "stopAutoUpdate"; do
+            if ! grep -q "$method" "$JS"; then
+              echo "❌ 缺少公开方法: $method"
+              FAIL=1
+            else
+              echo "✅ $method"
+            fi
+          done
+
+          # --- 内存泄漏检查 ---
+          echo ""
+          echo "=== 检查事件监听器管理 ==="
+          add_count=$(grep -c "addEventListener" "$JS" || true)
+          remove_count=$(grep -c "removeEventListener" "$JS" || true)
+          echo "addEventListener 调用: $add_count"
+          echo "removeEventListener 调用: $remove_count"
+          # destroy 方法中应有清理逻辑
+          if grep -A 20 "destroy()" "$JS" | grep -q "removeEventListener"; then
+            echo "✅ destroy() 包含事件清理"
+          else
+            echo "❌ destroy() 缺少事件清理，可能存在内存泄漏"
+            FAIL=1
+          fi
+
+          # --- this 泄漏检查 ---
+          echo ""
+          echo "=== 检查 this 上下文 ==="
+          if grep -nE "\.bind\(this\)" "$JS"; then
+            echo "⚠️  发现 .bind(this)，确认是否必要"
+          fi
+          if grep -nE "var\s+" "$JS"; then
+            echo "❌ 发现 var 声明，应使用 const/let"
+            FAIL=1
+          fi
+          echo "✅ 无 var 声明"
+
+          # --- with 语句 ---
+          echo ""
+          echo "=== 检查 with 语句 ==="
+          if grep -nE "^\s*with\s*\(" "$JS"; then
+            echo "❌ 发现 with 语句"
+            FAIL=1
+          fi
+          echo "✅ 无 with 语句"
+
+          # --- === vs == ---
+          echo ""
+          echo "=== 检查松散比较 ==="
+          loose=$(grep -nE "[^!=]==[^=]" "$JS" | grep -v "===" || true)
+          if [ -n "$loose" ]; then
+            echo "❌ 发现松散比较 == :"
+            echo "$loose"
+            FAIL=1
+          fi
+          echo "✅ 无松散比较"
+
+          # --- 未使用的变量（简单检查） ---
+          echo ""
+          echo "=== 检查潜在未使用变量 ==="
+          # 检查只声明未引用的 const/let
+          grep -nE "^\s*(const|let)\s+\w+" "$JS" | while IFS= read -r line; do
+            varname=$(echo "$line" | sed -E "s/.*\b(const|let)\s+(\w+).*/\2/")
+            linenums=$(echo "$line" | cut -d: -f1)
+            # 统计变量名在文件中出现的次数
+            count=$(grep -o "\b${varname}\b" "$JS" | wc -l)
+            if [ "$count" -le 1 ]; then
+              echo "⚠️  行 $linenums: 变量 '$varname' 仅声明未使用"
+            fi
+          done
+          echo "✅ 潜在未使用变量检查完成"
+
+          # --- localStorage 容错 ---
+          echo ""
+          echo "=== 检查 localStorage 容错 ==="
+          if grep -q "localStorage" "$JS"; then
+            if grep -B 2 -A 2 "localStorage" "$JS" | grep -q "try"; then
+              echo "✅ localStorage 调用有 try-catch 保护"
+            else
+              echo "❌ localStorage 调用缺少 try-catch 保护"
+              FAIL=1
+            fi
+          fi
+
+          # --- 无障碍检查 ---
+          echo ""
+          echo "=== 检查无障碍属性 ==="
+          if grep -q "createElement.*button" "$JS"; then
+            if grep -q "aria-label" "$JS"; then
+              echo "✅ 按钮有 aria-label"
+            else
+              echo "❌ 按钮缺少 aria-label"
+              FAIL=1
+            fi
+          fi
+
+          # --- CSS 变量引用检查 ---
+          echo ""
+          echo "=== 检查 JS 中的 CSS 变量引用 ==="
+          css_vars=$(grep -oE "var\(--[a-z-]+\)" "$JS" | sort -u || true)
+          if [ -n "$css_vars" ]; then
+            echo "引用的 CSS 变量:"
+            echo "$css_vars"
+          fi
+          echo "✅ CSS 变量引用检查完成"
+
+          # --- 代码风格 ---
+          echo ""
+          echo "=== 检查代码风格 ==="
+          # 检查是否有 tab 字符（应使用空格）
+          if grep -n $'\t' "$JS" | grep -v "cssText" | head -5; then
+            echo "⚠️  发现 tab 缩进（建议使用空格）"
+          fi
+          # 检查末尾分号
+          missing_semi=$(grep -nE "^\s*(const|let|var|return|this\.)" "$JS" | grep -v ";$" | grep -v "{" | grep -v "}" | grep -v "//" || true)
+          if [ -n "$missing_semi" ]; then
+            echo "⚠️  以下行可能缺少末尾分号:"
+            echo "$missing_semi" | head -5
+          fi
+          echo "✅ 代码风格检查完成"
+
+          echo ""
+          if [ $FAIL -eq 1 ]; then
+            echo "❌ JavaScript 质量检查未通过"
+            exit 1
+          fi
+          echo "✅ JavaScript 质量检查全部通过"
+
+  check-css:
+    name: CSS 质量检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CSS 静态质量检查
+        run: |
+          CSS="DayNightModule/modules/theme/theme.css"
+          FAIL=0
+
+          # --- 必要的选择器 ---
+          echo "=== 检查必要选择器 ==="
+          if grep -q ':root' "$CSS"; then
+            echo "✅ :root 日间变量"
+          else
+            echo "❌ 缺少 :root 选择器"
+            FAIL=1
+          fi
+
+          if grep -q '\[data-theme="night"\]' "$CSS"; then
+            echo "✅ [data-theme=\"night\"] 夜间变量"
+          else
+            echo "❌ 缺少 [data-theme=\"night\"] 选择器"
+            FAIL=1
+          fi
+
+          # --- 必要的 CSS 变量 ---
+          echo ""
+          echo "=== 检查必要 CSS 变量 ==="
+          for var in "--bg-primary" "--bg-secondary" "--text-primary" "--text-secondary" "--border-color" "--accent-primary" "--shadow-color" "--transition-speed"; do
+            if grep -qF -- "$var" "$CSS"; then
+              echo "✅ $var"
+            else
+              echo "❌ 缺少变量: $var"
+              FAIL=1
+            fi
+          done
+
+          # --- 反模式检查 ---
+          echo ""
+          echo "=== 检查 CSS 反模式 ==="
+
+          # * { transition } 全局污染
+          if grep -nE '^\s*\*\s*\{' "$CSS"; then
+            if grep -A 3 '^\s*\*\s*\{' "$CSS" | grep -q "transition"; then
+              echo "❌ 发现 * { transition } 全局污染"
+              FAIL=1
+            fi
+          fi
+          echo "✅ 无全局 transition 污染"
+
+          # !important 滥用
+          imp_count=$(grep -c "!important" "$CSS" || true)
+          echo "!important 使用次数: $imp_count"
+          if [ "$imp_count" -gt 5 ]; then
+            echo "⚠️  !important 使用过多（${imp_count} 次）"
+          fi
+          echo "✅ !important 检查通过"
+
+          # 通用类名冲突
+          echo ""
+          echo "=== 检查通用类名冲突 ==="
+          for cls in "^\.container\s" "^\.card\s" "^\.button\s" "^\.wrapper\s" "^\.row\s" "^\.col-"; do
+            if grep -nE "$cls" "$CSS"; then
+              echo "❌ 发现通用类名，易与其他框架冲突"
+              FAIL=1
+            fi
+          done
+          echo "✅ 无通用类名冲突"
+
+          # --- 无障碍支持 ---
+          echo ""
+          echo "=== 检查无障碍支持 ==="
+          if grep -q "prefers-reduced-motion" "$CSS"; then
+            echo "✅ 支持 prefers-reduced-motion"
+          else
+            echo "❌ 缺少 prefers-reduced-motion 支持"
+            FAIL=1
+          fi
+
+          # --- 按钮样式完整性 ---
+          echo ""
+          echo "=== 检查按钮样式完整性 ==="
+          if grep -q "\.dnm-toggle" "$CSS"; then
+            echo "✅ .dnm-toggle 按钮样式存在"
+          else
+            echo "❌ 缺少 .dnm-toggle 按钮样式"
+            FAIL=1
+          fi
+
+          # :hover
+          if grep -q "\.dnm-toggle:hover" "$CSS"; then
+            echo "✅ .dnm-toggle:hover 悬停样式"
+          else
+            echo "❌ 缺少 .dnm-toggle:hover 悬停样式"
+            FAIL=1
+          fi
+
+          # :focus-visible
+          if grep -q "\.dnm-toggle:focus-visible" "$CSS"; then
+            echo "✅ .dnm-toggle:focus-visible 焦点样式"
+          else
+            echo "❌ 缺少 .dnm-toggle:focus-visible 焦点样式"
+            FAIL=1
+          fi
+
+          # :active
+          if grep -q "\.dnm-toggle:active" "$CSS"; then
+            echo "✅ .dnm-toggle:active 按下样式"
+          else
+            echo "⚠️  缺少 .dnm-toggle:active 按下样式"
+          fi
+
+          # --- 变量一致性检查 ---
+          echo ""
+          echo "=== 检查变量一致性 ==="
+          # 提取 :root 中的变量名（去掉尾部冒号）
+          root_vars=$(grep -oE -- '--[a-z-]+:' "$CSS" | head -20 | sed 's/:$//' | sort -u)
+          # 提取 [data-theme="night"] 中的变量名
+          night_start=$(grep -n '\[data-theme="night"\]' "$CSS" | head -1 | cut -d: -f1)
+          if [ -n "$night_start" ]; then
+            night_vars=$(tail -n "+$night_start" "$CSS" | grep -oE -- '--[a-z-]+:' | sed 's/:$//' | sort -u)
+            # 检查 night 是否覆盖了 root 的所有变量
+            missing=$(comm -23 <(echo "$root_vars") <(echo "$night_vars"))
+            if [ -n "$missing" ]; then
+              echo "⚠️  夜间主题未覆盖以下变量:"
+              echo "$missing"
+            else
+              echo "✅ 夜间主题完整覆盖所有日间变量"
+            fi
+          fi
+
+          # --- 注释完整性 ---
+          echo ""
+          echo "=== 检查注释完整性 ==="
+          comment_count=$(grep -cE '^\s*/\*|^\s*\*' "$CSS" || true)
+          echo "注释行数: $comment_count"
+          if [ "$comment_count" -gt 5 ]; then
+            echo "✅ 注释充足"
+          else
+            echo "⚠️  注释较少（${comment_count} 行）"
+          fi
+
+          echo ""
+          if [ $FAIL -eq 1 ]; then
+            echo "❌ CSS 质量检查未通过"
+            exit 1
+          fi
+          echo "✅ CSS 质量检查全部通过"
+
+  check-docs:
+    name: 文档完整性检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查文档内容
+        run: |
+          FAIL=0
+
+          echo "=== Architecture.md ==="
+          if grep -q '^#' Architecture.md; then
+            echo "✅ 有标题"
+          else
+            echo "❌ 缺少标题"
+            FAIL=1
+          fi
+          lines=$(wc -l < Architecture.md)
+          echo "行数: $lines"
+          [ "$lines" -gt 10 ] || { echo "❌ 内容过少（<10 行）"; FAIL=1; }
+          echo "✅ Architecture.md 通过"
+
+          echo ""
+          echo "=== README.md ==="
+          if grep -q '^#' README.md; then
+            echo "✅ 有标题"
+          else
+            echo "❌ 缺少标题"
+            FAIL=1
+          fi
+          # 必须包含关键章节
+          for section in "快速开始" "API" "配置项" "项目结构"; do
+            if grep -q "$section" README.md; then
+              echo "✅ 包含章节: $section"
+            else
+              echo "❌ 缺少章节: $section"
+              FAIL=1
+            fi
+          done
+          lines=$(wc -l < README.md)
+          echo "行数: $lines"
+          [ "$lines" -gt 20 ] || { echo "❌ 内容过少（<20 行）"; FAIL=1; }
+          echo "✅ README.md 通过"
+
+          echo ""
+          echo "=== File_Index.md ==="
+          if grep -q '^#' File_Index.md; then
+            echo "✅ 有标题"
+          else
+            echo "❌ 缺少标题"
+            FAIL=1
+          fi
+          # 必须列出模块文件
+          for f in "theme.css" "theme-manager.js"; do
+            if grep -q "$f" File_Index.md; then
+              echo "✅ 索引包含: $f"
+            else
+              echo "❌ 索引缺少: $f"
+              FAIL=1
+            fi
+          done
+          lines=$(wc -l < File_Index.md)
+          echo "行数: $lines"
+          [ "$lines" -gt 10 ] || { echo "❌ 内容过少（<10 行）"; FAIL=1; }
+          echo "✅ File_Index.md 通过"
+
+          echo ""
+          if [ $FAIL -eq 1 ]; then
+            echo "❌ 文档完整性检查未通过"
+            exit 1
+          fi
+          echo "✅ 文档完整性检查全部通过"
+
+  check-git:
+    name: Git 规范检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查 Git 规范
+        run: |
+          FAIL=0
+
+          echo "=== .gitignore 检查 ==="
+          for pattern in ".idea" "target" "*.class" "*.jar" ".DS_Store" ".claude"; do
+            if grep -q "$pattern" .gitignore; then
+              echo "✅ 忽略 $pattern"
+            else
+              echo "⚠️  未忽略 $pattern"
+            fi
+          done
+
+          echo ""
+          echo "=== 敏感文件检查 ==="
+          for f in ".env" ".env.local" "id_rsa" "id_ed25519" "*.pem" "*.key"; do
+            found=$(find . -name "$f" ! -path "./.git/*" ! -path "./AGENTS/*" 2>/dev/null)
+            if [ -n "$found" ]; then
+              echo "❌ 发现敏感文件: $found"
+              FAIL=1
+            fi
+          done
+          echo "✅ 无敏感文件"
+
+          echo ""
+          echo "=== 大文件检查（>100KB） ==="
+          large=$(find . -type f ! -path "./.git/*" ! -path "./AGENTS/*" -size +100k 2>/dev/null)
+          if [ -n "$large" ]; then
+            echo "⚠️  发现大文件:"
+            echo "$large"
+          else
+            echo "✅ 无大文件"
+          fi
+
+          echo ""
+          if [ $FAIL -eq 1 ]; then
+            echo "❌ Git 规范检查未通过"
+            exit 1
+          fi
+          echo "✅ Git 规范检查通过"

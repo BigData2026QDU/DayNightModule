@@ -1,0 +1,112 @@
+/*
+ * DayNightModule — 日间/夜间主题样式
+ *
+ * 变量层：提供两套 CSS 自定义属性
+ * 组件层：仅提供主题切换按钮样式
+ *
+ * 使用方式：
+ *   :root              → 日间主题（默认）
+ *   [data-theme="night"] → 夜间主题
+ *
+ * 注意：本模块不定义通用组件样式，
+ * 请根据项目需要自行使用变量。
+ */
+
+/* ========================================
+   日间主题变量（默认）
+   ======================================== */
+:root {
+  --transition-speed: 0.3s;
+
+  /* 背景色 */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #e8e8e8;
+
+  /* 文字色 */
+  --text-primary: #1a1a1a;
+  --text-secondary: #4a4a4a;
+  --text-tertiary: #6a6a6a;
+
+  /* 边框与阴影 */
+  --border-color: #d0d0d0;
+  --shadow-color: rgba(0, 0, 0, 0.1);
+
+  /* 强调色 */
+  --accent-primary: #3b82f6;
+  --accent-secondary: #60a5fa;
+  --accent-hover: #2563eb;
+}
+
+/* ========================================
+   夜间主题变量
+   ======================================== */
+[data-theme="night"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2a2a2a;
+  --bg-tertiary: #3a3a3a;
+
+  --text-primary: #e8e8e8;
+  --text-secondary: #b8b8b8;
+  --text-tertiary: #888888;
+
+  --border-color: #404040;
+  --shadow-color: rgba(0, 0, 0, 0.3);
+
+  --accent-primary: #60a5fa;
+  --accent-secondary: #3b82f6;
+  --accent-hover: #93c5fd;
+}
+
+/* ========================================
+   主题切换按钮
+   ======================================== */
+.dnm-toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 9999;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  border: none;
+  border-radius: 8px;
+  background-color: var(--accent-primary);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background-color var(--transition-speed) ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dnm-toggle:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.dnm-toggle:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.dnm-toggle:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* ========================================
+   减少动画模式
+   ======================================== */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-speed: 0s;
+  }
+
+  .dnm-toggle {
+    transition: none;
+  }
+}
